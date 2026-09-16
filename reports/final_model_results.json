@@ -1,0 +1,26 @@
+{
+  "best_params": {
+    "max_depth": 6,
+    "min_samples_leaf": 4,
+    "min_samples_split": 2,
+    "n_estimators": 300
+  },
+  "cv_roc_auc": 0.840514950166113,
+  "test_metrics": {
+    "Accuracy": 0.7467532467532467,
+    "Precision": 0.6829268292682927,
+    "Recall": 0.5185185185185185,
+    "F1": 0.5894736842105263,
+    "ROC_AUC": 0.8061111111111111
+  },
+  "feature_importance": {
+    "Glucose": 0.3658170319056946,
+    "BMI": 0.1699023283115351,
+    "Age": 0.12364725682399495,
+    "DiabetesPedigreeFunction": 0.08908792666066451,
+    "Insulin": 0.08844300596447598,
+    "Pregnancies": 0.05981115310390904,
+    "BloodPressure": 0.05255707710875278,
+    "SkinThickness": 0.05073422012097302
+  }
+}
