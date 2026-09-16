@@ -69,16 +69,19 @@ Full step-by-step details, code, and output are in
    `Glucose_Category` were derived for visualization, confirming diabetes rate rises with glucose
    band, BMI band, and age group. These engineered columns are **not** used as model inputs.
 6. **Missing value imputation — leakage-safe.** Missing values are filled using
-   `SimpleImputer(strategy="median")`, **fit only on the training split**, then applied unchanged
-   to the test split.
+   `SimpleImputer(strategy="median")` inside a scikit-learn `Pipeline`. It is **fit only on
+   training data**: on the training folds during cross-validation, and on the full training split
+   for the final model. The fitted medians are then applied unchanged to held-out data.
 
    **Important methodological note:** an earlier version of this pipeline imputed missing values
    using the median computed *per target class* (grouped by `Outcome`). This was identified as a
    **target leakage** bug — it directly encodes the answer into the feature for the ~49% of
    `Insulin` values that were missing, producing an artificially inflated accuracy (~86%). This
    was corrected to the leakage-safe approach described above, giving an honest, lower, but
-   trustworthy accuracy (~75%). See Section 6 of the notebook for the full explanation.
-7. **Feature scaling** — `StandardScaler`, fit only on the training split.
+   trustworthy accuracy (~69% on the test set, ~79% in cross-validation). See Sections 3.6 and 7.2
+   of the notebook for the full explanation.
+7. **Feature scaling** — `StandardScaler`, in the same `Pipeline`, so it is also fit only on
+   training data.
 
 ## 4. Data Mining Technique & Algorithm Selection
 
@@ -95,9 +98,11 @@ Full step-by-step details, code, and output are in
 | Support Vector Machine | Effective non-linear decision boundary for moderate-dimension numeric data |
 | Naive Bayes | Fast probabilistic baseline |
 
-All six were evaluated with reasonable default settings; the best performer (**Random Forest**,
-by ROC-AUC) was then tuned via `GridSearchCV` (5-fold cross-validation) over `n_estimators`,
-`max_depth`, `min_samples_split`, and `min_samples_leaf`.
+All six were evaluated with reasonable default settings using **stratified 5-fold
+cross-validation on the training set**. The model with the best **cross-validated ROC-AUC** was
+then tuned via `GridSearchCV` (same 5 folds, ROC-AUC scoring), using a hyperparameter grid defined
+for each algorithm. The test set was not used for either step; it is used once, to evaluate the
+final model.
 
 ## 5. Tool Used
 
@@ -108,39 +113,55 @@ and for reproducibility.
 
 ## 6. Results
 
-### Baseline model comparison (test set)
+### Baseline model comparison
 
-| Model | Accuracy | Precision | Recall | F1 | ROC-AUC | 5-fold CV Accuracy |
-|---|---|---|---|---|---|---|
-| **Random Forest** | 0.747 | 0.660 | 0.574 | 0.614 | **0.816** | 0.770 ± 0.043 |
-| Logistic Regression | 0.708 | 0.600 | 0.500 | 0.545 | 0.813 | 0.782 ± 0.012 |
-| Support Vector Machine | 0.740 | 0.652 | 0.556 | 0.600 | 0.796 | 0.769 ± 0.018 |
-| K-Nearest Neighbors | 0.734 | 0.633 | 0.574 | 0.602 | 0.788 | 0.764 ± 0.035 |
-| Naive Bayes | 0.701 | 0.567 | 0.630 | 0.596 | 0.765 | 0.759 ± 0.008 |
-| Decision Tree | 0.760 | 0.639 | 0.722 | 0.678 | 0.762 | 0.723 ± 0.019 |
+Sorted by 5-fold cross-validated ROC-AUC, the selection criterion. Test-set columns are for
+reference only.
+
+| Model | **CV ROC-AUC** | CV Accuracy | CV Recall | Test Accuracy | Test Precision | Test Recall | Test F1 | Test ROC-AUC |
+|---|---|---|---|---|---|---|---|---|
+| **Logistic Regression** | **0.843 ± 0.019** | 0.788 | 0.575 | 0.708 | 0.600 | 0.500 | 0.545 | 0.813 |
+| Support Vector Machine | 0.833 ± 0.023 | 0.780 | 0.584 | 0.740 | 0.652 | 0.556 | 0.600 | 0.796 |
+| Naive Bayes | 0.828 ± 0.010 | 0.762 | 0.598 | 0.701 | 0.567 | 0.630 | 0.596 | 0.765 |
+| K-Nearest Neighbors | 0.822 ± 0.030 | 0.753 | 0.557 | 0.734 | 0.633 | 0.574 | 0.602 | 0.788 |
+| Random Forest | 0.820 ± 0.022 | 0.774 | 0.608 | 0.747 | 0.660 | 0.574 | 0.614 | 0.817 |
+| Decision Tree | 0.771 ± 0.029 | 0.730 | 0.560 | 0.760 | 0.639 | 0.722 | 0.678 | 0.762 |
 
 Full CSV: [`reports/model_comparison.csv`](reports/model_comparison.csv)
 
-### Final tuned model: Random Forest
+Random Forest has the best *test* ROC-AUC, but only by 0.004, on 154 patients, and it ranks 5th in
+cross-validation. Decision Tree has the best test accuracy but the worst CV score. Differences this
+small on a single test split are noise, which is why selection uses cross-validation only.
 
-- **Best hyperparameters:** `max_depth=6, min_samples_leaf=4, min_samples_split=2, n_estimators=300`
-- **5-fold CV ROC-AUC:** 0.841
-- **Test set:** Accuracy 0.747 · Precision 0.683 · Recall 0.519 · F1 0.589 · **ROC-AUC 0.806**
+### Final tuned model: Logistic Regression
 
-Full metrics + feature importances: [`reports/final_model_results.json`](reports/final_model_results.json)
+- **Best hyperparameters:** `C=0.1` (searched `C ∈ {0.01, 0.1, 1, 10, 100}`)
+- **5-fold CV ROC-AUC:** 0.844 (untuned: 0.843)
+- **Test set:** Accuracy 0.688 · Precision 0.565 · Recall 0.481 · F1 0.520 · **ROC-AUC 0.810**
+- **Untuned, for comparison:** Accuracy 0.708 · Precision 0.600 · Recall 0.500 · F1 0.545 · ROC-AUC 0.813
 
-**Top predictive features:** Glucose (37%), BMI (17%), Age (12%), DiabetesPedigreeFunction (9%),
-Insulin (9%) — see [`images/06_feature_importance.png`](images/06_feature_importance.png).
+**Tuning did not improve test performance.** The CV gain was negligible and the test scores
+dropped slightly, so the default `C=1` was already close to optimal.
+
+Full metrics + coefficients: [`reports/final_model_results.json`](reports/final_model_results.json)
+
+**Top predictive features** (by |standardized coefficient|): Glucose (1.02), BMI (0.58),
+Pregnancies (0.32), DiabetesPedigreeFunction (0.21), Age (0.16). See
+[`images/06_feature_importance.png`](images/06_feature_importance.png).
 
 ### Discussion
 
 - The model performs meaningfully better than random guessing (ROC-AUC 0.81) and its top features
   match known clinical risk factors for diabetes.
-- **Recall on the diabetes class (0.52) is the weakest metric** — of 54 diabetic patients in the
-  test set, 26 were missed (false negatives). In a real screening context this is the most
+- The simplest model compared, Logistic Regression, generalizes as well as or better than the
+  more complex ones on this small dataset.
+- **Recall on the diabetes class (0.48) is the weakest metric.** Of 54 diabetic patients in the
+  test set, 28 were missed (false negatives). In a real screening context this is the most
   important number to improve, since a missed diagnosis is costlier than a false alarm.
-- The corrected (leakage-safe) accuracy of ~75% is intentionally reported instead of the
-  ~86% obtained by the earlier, flawed pipeline — see Section 3, point 6.
+- Test accuracy (~69%) is well below CV accuracy (~79%). A single 154-patient test split is noisy,
+  so the CV estimates are the more reliable guide.
+- The corrected (leakage-safe) results are intentionally reported instead of the ~86% accuracy
+  obtained by the earlier, flawed pipeline; see Section 3, point 6.
 
 ### Limitations
 
@@ -185,6 +206,8 @@ diabetes_project/
 ```
 
 ## How to Reproduce
+
+All scripts resolve paths relative to the project folder, so they can be run from any directory.
 
 ```bash
 pip install -r requirements.txt

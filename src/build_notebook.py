@@ -1,4 +1,6 @@
 """Programmatically build the final analysis.ipynb from markdown + code cells."""
+from pathlib import Path
+
 import nbformat as nbf
 
 nb = nbf.v4.new_notebook()
@@ -169,13 +171,13 @@ do this before splitting the data, for two reasons:
 **Correct approach used here:** the train/test split happens first. Then a `SimpleImputer`
 (median strategy) is **fit only on the training data**, and the *same* fitted values are applied
 to fill missing values in both the training and test sets. This is done inside the modeling
-pipeline in Section 5, using scikit-learn's `SimpleImputer`.
+pipeline in Section 6, using scikit-learn's `SimpleImputer`.
 
 ### 3.7 Feature Engineering (Exploratory)
 
 For exploration, three categorical features were engineered from the continuous variables. These
 are used only for visualization / interpretation in this notebook, not as model inputs, since the
-raw numeric values already carry this information for the algorithms used in Section 5.
+raw numeric values already carry this information for the algorithms used in Section 6.
 """)
 
 code("""df_explore = df.copy()
@@ -222,11 +224,10 @@ family of methods, as opposed to descriptive techniques like clustering or assoc
 | **Support Vector Machine (SVM)** | Effective for finding a non-linear decision boundary in moderate-dimensional numeric data |
 | **Naive Bayes** | A fast probabilistic baseline that assumes feature independence — useful as a lower-bound comparison |
 
-We first compare all six with reasonable default settings, then take the best-performing model
-and tune its hyperparameters with grid search to get our final model. Random Forest was expected
-to do well here because it handles the mix of skewed and normally-distributed features without
-needing them all to be linearly related to the outcome, and it is robust to the noise introduced
-by the imputed missing values.
+We first compare all six with reasonable default settings using 5-fold cross-validation on the
+training set, then take the model with the best cross-validated ROC-AUC and tune its
+hyperparameters with grid search to get our final model. The test set is held back and used only
+once, to evaluate that final model.
 
 ## 5. Tool Used
 
@@ -247,15 +248,17 @@ md("""## 6. Modeling & Evaluation
 ### 6.1 Train/Test Split and Leakage-Safe Preprocessing
 """)
 
-code("""from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score, StratifiedKFold
+code("""from sklearn.model_selection import train_test_split, GridSearchCV, cross_validate, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
 from sklearn.linear_model import LogisticRegression
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 from sklearn.naive_bayes import GaussianNB
+from sklearn.inspection import permutation_importance
 from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score,
                               roc_auc_score, confusion_matrix, classification_report, roc_curve)
 
@@ -271,16 +274,23 @@ X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.2, random_state=42, stratify=y)
 print("Train size:", X_train.shape[0], " Test size:", X_test.shape[0])
 
-imputer = SimpleImputer(strategy="median")
-scaler = StandardScaler()
+# Imputer + scaler live INSIDE the pipeline, so they are re-fit on the training
+# folds only during cross-validation, and on the training set only for the final fit.
+def make_pipeline(model):
+    return Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        ("scaler", StandardScaler()),
+        ("model", model),
+    ])
 
-X_train_imp = imputer.fit_transform(X_train)   # fit ONLY on train
-X_test_imp  = imputer.transform(X_test)        # apply same fitted medians to test
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)""")
 
-X_train_scaled = scaler.fit_transform(X_train_imp)
-X_test_scaled  = scaler.transform(X_test_imp)""")
+md("""### 6.2 Baseline Model Comparison
 
-md("### 6.2 Baseline Model Comparison")
+Each model is evaluated with **5-fold cross-validation on the training set**, and that is what we
+use to pick the model to tune. Test-set scores are shown for reference only: using them to choose
+a model would turn the test set into a second validation set and make the final result optimistic.
+""")
 
 code("""models = {
     "Logistic Regression": LogisticRegression(max_iter=1000, random_state=42),
@@ -291,27 +301,30 @@ code("""models = {
     "Naive Bayes": GaussianNB(),
 }
 
+def test_metrics(pipe):
+    y_pred = pipe.predict(X_test)
+    y_proba = pipe.predict_proba(X_test)[:,1]
+    return {"Accuracy": accuracy_score(y_test, y_pred), "Precision": precision_score(y_test, y_pred),
+            "Recall": recall_score(y_test, y_pred), "F1": f1_score(y_test, y_pred),
+            "ROC_AUC": roc_auc_score(y_test, y_proba)}
+
 results = []
 roc_data = {}
 
 for name, model in models.items():
-    model.fit(X_train_scaled, y_train)
-    y_pred = model.predict(X_test_scaled)
-    y_proba = model.predict_proba(X_test_scaled)[:,1]
+    pipe = make_pipeline(model)
+    cv_res = cross_validate(pipe, X_train, y_train, cv=cv, scoring=["roc_auc", "accuracy", "recall"])
+    pipe.fit(X_train, y_train)
+    test = test_metrics(pipe)
 
-    acc = accuracy_score(y_test, y_pred)
-    prec = precision_score(y_test, y_pred)
-    rec = recall_score(y_test, y_pred)
-    f1 = f1_score(y_test, y_pred)
-    auc = roc_auc_score(y_test, y_proba)
-    cv = cross_val_score(model, X_train_scaled, y_train, cv=StratifiedKFold(5), scoring="accuracy")
+    results.append({"Model": name,
+                    "CV_ROC_AUC": cv_res["test_roc_auc"].mean(), "CV_ROC_AUC_Std": cv_res["test_roc_auc"].std(),
+                    "CV_Accuracy": cv_res["test_accuracy"].mean(), "CV_Recall": cv_res["test_recall"].mean(),
+                    **{f"Test_{k}": v for k, v in test.items()}})
+    fpr, tpr, _ = roc_curve(y_test, pipe.predict_proba(X_test)[:,1])
+    roc_data[name] = (fpr, tpr, test["ROC_AUC"])
 
-    results.append({"Model": name, "Accuracy": acc, "Precision": prec, "Recall": rec,
-                     "F1": f1, "ROC_AUC": auc, "CV_Mean_Accuracy": cv.mean(), "CV_Std": cv.std()})
-    fpr, tpr, _ = roc_curve(y_test, y_proba)
-    roc_data[name] = (fpr, tpr, auc)
-
-results_df = pd.DataFrame(results).sort_values("ROC_AUC", ascending=False)
+results_df = pd.DataFrame(results).sort_values("CV_ROC_AUC", ascending=False)
 results_df.round(4)""")
 
 code("""plt.figure(figsize=(7,6))
@@ -319,41 +332,56 @@ for name, (fpr, tpr, auc) in roc_data.items():
     plt.plot(fpr, tpr, label=f"{name} (AUC={auc:.3f})")
 plt.plot([0,1],[0,1],"k--", alpha=0.4)
 plt.xlabel("False Positive Rate"); plt.ylabel("True Positive Rate")
-plt.title("ROC Curves — All Models")
+plt.title("ROC Curves — All Models (test set)")
 plt.legend(loc="lower right", fontsize=8)
 plt.tight_layout()
 plt.show()""")
 
-md("""**Random Forest** has the best ROC-AUC among the baseline models, so it was selected for
-hyperparameter tuning.
+md("""**Logistic Regression** has the best cross-validated ROC-AUC (0.843 ± 0.019), ahead of SVM (0.833)
+and Naive Bayes (0.828), so it is the model selected for hyperparameter tuning.
 
-### 6.3 Hyperparameter Tuning (Random Forest)
+Note that this is *not* the model with the best test-set ROC-AUC. Random Forest scores slightly
+higher on the test set (0.817 vs. 0.813) but ranks only 5th in cross-validation (0.820). With just
+154 test patients, a gap that small is noise. Decision Tree shows the same effect even more
+clearly: best test accuracy, worst cross-validation score. That is exactly why selection is done
+with cross-validation and not with the test set.
+
+### 6.3 Hyperparameter Tuning (Selected Model)
 """)
 
-code("""param_grid = {
-    "n_estimators": [100, 200, 300],
-    "max_depth": [4, 6, 8, None],
-    "min_samples_split": [2, 5, 10],
-    "min_samples_leaf": [1, 2, 4],
+code("""param_grids = {
+    "Logistic Regression": {"model__C": [0.01, 0.1, 1, 10, 100]},
+    "Decision Tree": {"model__max_depth": [3, 4, 5, 6, 8, None],
+                      "model__min_samples_leaf": [1, 5, 10, 20],
+                      "model__criterion": ["gini", "entropy"]},
+    "Random Forest": {"model__n_estimators": [100, 200, 300],
+                      "model__max_depth": [4, 6, 8, None],
+                      "model__min_samples_split": [2, 5, 10],
+                      "model__min_samples_leaf": [1, 2, 4]},
+    "K-Nearest Neighbors": {"model__n_neighbors": [5, 7, 9, 11, 15, 21, 31],
+                            "model__weights": ["uniform", "distance"]},
+    "Support Vector Machine": {"model__C": [0.1, 1, 10], "model__gamma": ["scale", 0.01, 0.1]},
+    "Naive Bayes": {"model__var_smoothing": np.logspace(-9, -3, 7)},
 }
 
-grid = GridSearchCV(RandomForestClassifier(random_state=42), param_grid,
-                     cv=StratifiedKFold(5), scoring="roc_auc", n_jobs=-1)
-grid.fit(X_train_scaled, y_train)
+best_name = results_df.iloc[0]["Model"]
+baseline_test = {k[len("Test_"):]: v for k, v in results_df.iloc[0].items() if k.startswith("Test_")}
+print("Selected for tuning (best CV ROC-AUC):", best_name)
 
-print("Best params:", grid.best_params_)
-print(f"Best CV ROC-AUC: {grid.best_score_:.4f}")
+grid = GridSearchCV(make_pipeline(models[best_name]), param_grids[best_name],
+                    cv=cv, scoring="roc_auc", n_jobs=-1)
+grid.fit(X_train, y_train)
 
-best_model = grid.best_estimator_
-y_pred_best = best_model.predict(X_test_scaled)
-y_proba_best = best_model.predict_proba(X_test_scaled)[:,1]
+print("Best params:", {k.removeprefix("model__"): v for k, v in grid.best_params_.items()})
+print(f"Best CV ROC-AUC: {grid.best_score_:.4f}  (untuned: {results_df.iloc[0]['CV_ROC_AUC']:.4f})")
 
-print("\\nFinal Test Set Performance:")
-print(f"  Accuracy:  {accuracy_score(y_test, y_pred_best):.4f}")
-print(f"  Precision: {precision_score(y_test, y_pred_best):.4f}")
-print(f"  Recall:    {recall_score(y_test, y_pred_best):.4f}")
-print(f"  F1:        {f1_score(y_test, y_pred_best):.4f}")
-print(f"  ROC-AUC:   {roc_auc_score(y_test, y_proba_best):.4f}")""")
+best_pipe = grid.best_estimator_
+y_pred_best = best_pipe.predict(X_test)
+final_metrics = test_metrics(best_pipe)
+
+print("\\nFinal Test Set Performance (untuned baseline in brackets):")
+for k, v in final_metrics.items():
+    print(f"  {k:10s} {v:.4f}  [{baseline_test[k]:.4f}]")""")
 
 code("""print(classification_report(y_test, y_pred_best, target_names=["No Diabetes","Diabetes"]))
 
@@ -361,16 +389,28 @@ cm = confusion_matrix(y_test, y_pred_best)
 plt.figure(figsize=(5,4))
 sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
             xticklabels=["No Diabetes","Diabetes"], yticklabels=["No Diabetes","Diabetes"])
-plt.title("Confusion Matrix — Tuned Random Forest")
+plt.title(f"Confusion Matrix — Tuned {best_name}")
 plt.ylabel("Actual"); plt.xlabel("Predicted")
 plt.tight_layout()
 plt.show()""")
 
-code("""importances = pd.Series(best_model.feature_importances_, index=feature_cols).sort_values()
+code("""# Tree models: impurity importance. Linear models: |coefficient| (features are standardized).
+# Anything else: permutation importance on the test set.
+fitted_model = best_pipe.named_steps["model"]
+if hasattr(fitted_model, "feature_importances_"):
+    importance_method, raw_importance = "Impurity-based feature importance", fitted_model.feature_importances_
+elif hasattr(fitted_model, "coef_"):
+    importance_method, raw_importance = "|Coefficient| (standardized features)", np.abs(fitted_model.coef_[0])
+else:
+    importance_method = "Permutation importance (drop in test ROC-AUC)"
+    raw_importance = permutation_importance(best_pipe, X_test, y_test, scoring="roc_auc",
+                                            n_repeats=30, random_state=42).importances_mean
+
+importances = pd.Series(raw_importance, index=feature_cols).sort_values()
 plt.figure(figsize=(7,5))
 importances.plot(kind="barh", color="#028090")
-plt.title("Feature Importance — Tuned Random Forest")
-plt.xlabel("Importance")
+plt.title(f"Feature Importance — Tuned {best_name}")
+plt.xlabel(importance_method)
 plt.tight_layout()
 plt.show()""")
 
@@ -379,13 +419,18 @@ md("""## 7. Results Discussion, Conclusions & Future Work
 
 ### 7.1 Summary of Results
 
-- The tuned **Random Forest** model reached **~74.7% accuracy** and a **ROC-AUC of ~0.81** on the
-  held-out test set — meaningfully better than a random guess, and consistent with published
-  results on this dataset (which typically range from 75–80% accuracy).
-- **Glucose** is by far the strongest predictor, followed by **BMI** and **Age** — this matches
-  medical knowledge (glucose level is the direct clinical marker of diabetes).
-- The model's **recall on the positive (diabetes) class is the weaker metric (~0.52)** — of the 54
-  diabetic patients in the test set, the model correctly flagged only 28, missing 26. In a real
+- **Logistic Regression**, the simplest model compared, had the best cross-validated ROC-AUC
+  (0.843) and was selected. After tuning (`C=0.1`) it reached **ROC-AUC 0.810** and **68.8%
+  accuracy** on the held-out test set. Its cross-validated accuracy was higher (~79%), which shows
+  how much a single 154-patient test set can move the numbers.
+- **Tuning did not improve test performance.** CV ROC-AUC rose only from 0.843 to 0.844, and the
+  test scores fell slightly (ROC-AUC 0.813 → 0.810, accuracy 70.8% → 68.8%). The default settings
+  were already close to optimal, and the difference is within noise.
+- **Glucose** is by far the strongest predictor (largest standardized coefficient), followed by
+  **BMI** and **Pregnancies**. This matches medical knowledge (glucose level is the direct
+  clinical marker of diabetes).
+- The model's **recall on the positive (diabetes) class is the weakest metric (0.48)**. Of the 54
+  diabetic patients in the test set, the model correctly flagged only 26 and missed 28. In a real
   screening context, this is the most important number to improve, because a **false negative**
   (telling an at-risk patient they are fine) is more costly than a false positive.
 
@@ -393,8 +438,10 @@ md("""## 7. Results Discussion, Conclusions & Future Work
 
 An earlier version of this pipeline imputed missing values using the median grouped by the target
 label, which leaked target information into the features and produced an inflated accuracy of
-~86%. We identified and corrected this (Section 3.6), and report the resulting, lower but
-trustworthy accuracy of ~75% here instead. This is an important lesson for any data mining
+~86%. We identified and corrected this (Section 3.6). Imputation and scaling now happen inside a
+scikit-learn `Pipeline`, so they are re-fit on the training folds only, even during
+cross-validation. Model selection uses cross-validation only, never the test set. The resulting
+accuracy (~69% on the test set, ~79% in cross-validation) is lower, but trustworthy. This is an important lesson for any data mining
 project: **a suspiciously high accuracy score is a reason to check for data leakage, not a reason
 to celebrate.**
 
@@ -407,7 +454,7 @@ to celebrate.**
 - 768 records is a fairly small dataset for machine learning; a larger sample would likely
   improve both accuracy and the reliability of the reported metrics.
 - The model should be treated as a **screening aid**, not a diagnostic tool — false negatives
-  (recall of ~0.52 on the positive class) mean it is not reliable enough to rule out diabetes on
+  (recall of ~0.48 on the positive class) mean it is not reliable enough to rule out diabetes on
   its own.
 
 ### 7.4 Future Work
@@ -423,7 +470,7 @@ to celebrate.**
 """)
 
 nb["cells"] = cells
-with open("/home/claude/diabetes_project/notebooks/analysis.ipynb", "w") as f:
+with open(Path(__file__).resolve().parent.parent / "notebooks" / "analysis.ipynb", "w", encoding="utf-8") as f:
     nbf.write(nb, f)
 
 print("Notebook written.")

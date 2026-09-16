@@ -2,6 +2,8 @@
 Step 1: Exploratory Data Analysis + Preprocessing
 Pima Indians Diabetes Dataset
 """
+from pathlib import Path
+
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -10,9 +12,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 sns.set_style("whitegrid")
-IMG = "/home/claude/diabetes_project/images"
+ROOT = Path(__file__).resolve().parent.parent
+IMG = ROOT / "images"
 
-df = pd.read_csv("/home/claude/diabetes_project/data/diabetes.csv")
+df = pd.read_csv(ROOT / "data" / "diabetes.csv")
 
 print("=" * 60)
 print("BASIC INFO")
@@ -133,7 +136,7 @@ n_dup = df_clean.duplicated().sum()
 print(f"\nStep 3: Duplicate rows check: {n_dup} found")
 
 # Save cleaned dataset
-df_clean.to_csv("/home/claude/diabetes_project/data/diabetes_clean.csv", index=False)
+df_clean.to_csv(ROOT / "data" / "diabetes_clean.csv", index=False)
 print(f"\nSaved cleaned dataset -> data/diabetes_clean.csv  (shape: {df_clean.shape})")
 
 print("\n" + "=" * 60)
